@@ -321,6 +321,24 @@ bool TuneProtocol::parseLine(const char* line, ParsedCommand& command) {
     return true;
   }
 
+  if (strcmp(cmd, "motor_test") == 0) {
+    const char* target = doc["target"];
+    if (target == nullptr) {
+      sendError("missing_target");
+      return false;
+    }
+    if (doc["rpm"].isNull()) {
+      sendError("missing_rpm");
+      return false;
+    }
+
+    command.type = ParsedCommand::Type::MotorTest;
+    strlcpy(command.motorTarget, target, sizeof(command.motorTarget));
+    command.hasMotorTestRpm = true;
+    command.motorTestRpm = doc["rpm"] | 0.0f;
+    return true;
+  }
+
   if (strcmp(cmd, "set_limit") == 0) {
     command.type = ParsedCommand::Type::SetLimit;
     command.hasPitchTarget = !doc["pitch_target"].isNull();

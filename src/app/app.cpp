@@ -11,6 +11,7 @@ constexpr uint32_t kImuPeriodUs = 2000;
 constexpr uint32_t kControlPeriodUs = 5000;
 constexpr uint32_t kLedPeriodMs = 50;
 constexpr uint32_t kAssistPeriodMs = 500;
+constexpr uint32_t kMotorFeedbackGraceMs = 300;
 
 uint32_t ledColor(const Adafruit_NeoPixel& strip, const bool armed, const FaultCode fault,
                   const TuneMode mode) {
@@ -70,8 +71,10 @@ void App::begin() {
     enterFault(FaultCode::ImuOffline);
   }
 
-  motorBus_.begin(Serial1, BoardPins::kMotorBaudRate, BoardPins::kMotorSerialRxPin,
-                  BoardPins::kMotorSerialTxPin);
+  leftMotorBus_.begin(leftMotorSerial_, BoardPins::kMotorBaudRate, BoardPins::kLeftMotorSerialRxPin,
+                      BoardPins::kLeftMotorSerialTxPin);
+  rightMotorBus_.begin(rightMotorSerial_, BoardPins::kMotorBaudRate,
+                       BoardPins::kRightMotorSerialRxPin, BoardPins::kRightMotorSerialTxPin);
   stopMotors();
 
   telemetry_.tsMs = millis();
@@ -86,8 +89,8 @@ void App::update() {
   }
 
   pollImuTask();
-  controlTask();
   motorPollTask();
+  controlTask();
   telemetryTask();
   ledTask();
 }
@@ -160,13 +163,19 @@ void App::handleCommand(const ParsedCommand& command) {
       return;
 
     case ParsedCommand::Type::SetDrive:
+      if (command.hasArm || command.hasSpeedRpm || command.hasTurnRpm) {
+        stopMotorTest();
+      }
       if (command.hasArm) {
         armed_ = command.arm;
         if (!armed_) {
+          motorFeedbackGraceUntilMs_ = 0;
           stopMotors();
         } else {
-          motorBus_.enableMotor(BoardPins::kLeftMotorAddress, true);
-          motorBus_.enableMotor(BoardPins::kRightMotorAddress, true);
+          resetMotorFeedback();
+          motorFeedbackGraceUntilMs_ = millis() + kMotorFeedbackGraceMs;
+          leftMotorBus_.enableMotor(BoardPins::kLeftMotorAddress, true);
+          rightMotorBus_.enableMotor(BoardPins::kRightMotorAddress, true);
         }
       }
       if (command.hasSpeedRpm) {
@@ -176,6 +185,14 @@ void App::handleCommand(const ParsedCommand& command) {
         userTurnTargetRpm_ = command.turnRpm;
       }
       tuneProtocol_.sendAck("set_drive", true);
+      return;
+
+    case ParsedCommand::Type::MotorTest:
+      if (!applyMotorTestCommand(command)) {
+        tuneProtocol_.sendError("invalid_motor_test_target");
+        return;
+      }
+      tuneProtocol_.sendAck("motor_test", true);
       return;
 
     case ParsedCommand::Type::GetStatus:
@@ -235,6 +252,47 @@ bool App::canApplyPendingConfig() const {
   return absValue(telemetry_.pitchDeg) < 10.0f && safetyManager_.faultCode() == FaultCode::None;
 }
 
+bool App::motorFeedbackGraceActive(const uint32_t nowMs) const {
+  return armed_ && nowMs < motorFeedbackGraceUntilMs_;
+}
+
+bool App::applyMotorTestCommand(const ParsedCommand& command) {
+  float leftRpm = leftMotorTestRpm_;
+  float rightRpm = rightMotorTestRpm_;
+
+  if (strcmp(command.motorTarget, "left") == 0) {
+    leftRpm = command.motorTestRpm;
+  } else if (strcmp(command.motorTarget, "right") == 0) {
+    rightRpm = command.motorTestRpm;
+  } else if (strcmp(command.motorTarget, "both") == 0) {
+    leftRpm = command.motorTestRpm;
+    rightRpm = command.motorTestRpm;
+  } else {
+    return false;
+  }
+
+  leftMotorTestRpm_ = leftRpm;
+  rightMotorTestRpm_ = rightRpm;
+  motorTestActive_ = absValue(leftMotorTestRpm_) > 0.01f || absValue(rightMotorTestRpm_) > 0.01f;
+  userSpeedTargetRpm_ = 0.0f;
+  userTurnTargetRpm_ = 0.0f;
+  filteredAverageRpm_ = 0.0f;
+
+  if (!motorTestActive_) {
+    armed_ = false;
+    motorFeedbackGraceUntilMs_ = 0;
+    stopMotors();
+    return true;
+  }
+
+  armed_ = true;
+  resetMotorFeedback();
+  motorFeedbackGraceUntilMs_ = millis() + kMotorFeedbackGraceMs;
+  leftMotorBus_.enableMotor(BoardPins::kLeftMotorAddress, true);
+  rightMotorBus_.enableMotor(BoardPins::kRightMotorAddress, true);
+  return true;
+}
+
 void App::pollImuTask() {
   const uint32_t nowUs = micros();
   if (nowUs - lastImuTaskUs_ < kImuPeriodUs) {
@@ -271,22 +329,72 @@ void App::controlTask() {
     tuneProtocol_.sendPid(activeTuning_);
   }
 
-  const float dtSec = static_cast<float>(kControlPeriodUs) / 1.0e6f;
   telemetry_.pitchTargetDeg = activeTuning_.pitchTargetDeg;
+  telemetry_.leftRpmActual = leftMotor_.actualRpm;
+  telemetry_.rightRpmActual = rightMotor_.actualRpm;
+  telemetry_.motorStateLeft = leftMotor_.stateFlags;
+  telemetry_.motorStateRight = rightMotor_.stateFlags;
+
+  if (motorTestActive_) {
+    telemetry_.speedOutput = 0.0f;
+    telemetry_.turnOutput = 0.0f;
+    telemetry_.balanceOutput = 0.0f;
+    telemetry_.leftRpmTarget = leftMotorTestRpm_;
+    telemetry_.rightRpmTarget = rightMotorTestRpm_;
+    telemetry_.outputSaturated = false;
+    telemetry_.faultCode = FaultCode::None;
+
+    leftMotorBus_.velocityControl(
+        BoardPins::kLeftMotorAddress,
+        static_cast<int16_t>(leftMotorTestRpm_ * BoardPins::kLeftMotorSign),
+        activeTuning_.motorAccel);
+    rightMotorBus_.velocityControl(
+        BoardPins::kRightMotorAddress,
+        static_cast<int16_t>(rightMotorTestRpm_ * BoardPins::kRightMotorSign),
+        activeTuning_.motorAccel);
+    return;
+  }
+
+  if (!armed_) {
+    balanceController_.reset();
+    speedController_.reset();
+    filteredAverageRpm_ = 0.0f;
+    telemetry_.speedOutput = 0.0f;
+    telemetry_.turnOutput = 0.0f;
+    telemetry_.balanceOutput = 0.0f;
+    telemetry_.leftRpmTarget = 0.0f;
+    telemetry_.rightRpmTarget = 0.0f;
+    telemetry_.outputSaturated = false;
+    telemetry_.faultCode = safetyManager_.faultCode();
+    stopMotors();
+    return;
+  }
+
+  const float dtSec = static_cast<float>(kControlPeriodUs) / 1.0e6f;
 
   const float averageMeasuredRpm =
       0.5f * (static_cast<float>(leftMotor_.actualRpm) + static_cast<float>(rightMotor_.actualRpm));
   filteredAverageRpm_ = lerpValue(filteredAverageRpm_, averageMeasuredRpm, 0.25f);
 
-  telemetry_.speedOutput = speedController_.update(userSpeedTargetRpm_, filteredAverageRpm_, dtSec);
-  telemetry_.turnOutput = clampValue(activeTuning_.turn.kp * userTurnTargetRpm_,
-                                     -activeTuning_.turn.outputLimit, activeTuning_.turn.outputLimit);
-  telemetry_.balanceOutput = balanceController_.update(
-      telemetry_.pitchDeg, activeTuning_.pitchTargetDeg, telemetry_.gyroDegPerSec, dtSec);
+  float leftTarget = 0.0f;
+  float rightTarget = 0.0f;
+  if (motorTestActive_) {
+    telemetry_.speedOutput = 0.0f;
+    telemetry_.turnOutput = 0.0f;
+    telemetry_.balanceOutput = 0.0f;
+    leftTarget = leftMotorTestRpm_;
+    rightTarget = rightMotorTestRpm_;
+  } else {
+    telemetry_.speedOutput = speedController_.update(userSpeedTargetRpm_, filteredAverageRpm_, dtSec);
+    telemetry_.turnOutput = clampValue(activeTuning_.turn.kp * userTurnTargetRpm_,
+                                       -activeTuning_.turn.outputLimit, activeTuning_.turn.outputLimit);
+    telemetry_.balanceOutput = balanceController_.update(
+        telemetry_.pitchDeg, activeTuning_.pitchTargetDeg, telemetry_.gyroDegPerSec, dtSec);
 
-  float baseRpm = telemetry_.balanceOutput + telemetry_.speedOutput;
-  float leftTarget = baseRpm - telemetry_.turnOutput;
-  float rightTarget = baseRpm + telemetry_.turnOutput;
+    const float baseRpm = telemetry_.balanceOutput + telemetry_.speedOutput;
+    leftTarget = baseRpm - telemetry_.turnOutput;
+    rightTarget = baseRpm + telemetry_.turnOutput;
+  }
 
   telemetry_.outputSaturated = false;
   if (absValue(leftTarget) > activeTuning_.rpmLimit || absValue(rightTarget) > activeTuning_.rpmLimit) {
@@ -299,11 +407,6 @@ void App::controlTask() {
 
   telemetry_.leftRpmTarget = leftTarget;
   telemetry_.rightRpmTarget = rightTarget;
-  telemetry_.leftRpmActual = leftMotor_.actualRpm;
-  telemetry_.rightRpmActual = rightMotor_.actualRpm;
-  telemetry_.motorStateLeft = leftMotor_.stateFlags;
-  telemetry_.motorStateRight = rightMotor_.stateFlags;
-
   telemetry_.metrics.angleAbsIntegral += absValue(telemetry_.pitchDeg) * dtSec;
   telemetry_.metrics.anglePeakDeg =
       max(telemetry_.metrics.anglePeakDeg, absValue(telemetry_.pitchDeg));
@@ -311,7 +414,8 @@ void App::controlTask() {
       0.5f * (absValue(telemetry_.leftRpmTarget - telemetry_.leftRpmActual) +
               absValue(telemetry_.rightRpmTarget - telemetry_.rightRpmActual));
 
-  telemetry_.faultCode = safetyManager_.evaluate(telemetry_, leftMotor_, rightMotor_, imu_.lastUpdateMs());
+  telemetry_.faultCode = safetyManager_.evaluate(telemetry_, leftMotor_, rightMotor_, imu_.lastUpdateMs(),
+                                                 !motorFeedbackGraceActive(telemetry_.tsMs));
 
   if (telemetry_.faultCode != FaultCode::None) {
     enterFault(telemetry_.faultCode);
@@ -323,11 +427,11 @@ void App::controlTask() {
     return;
   }
 
-  motorBus_.velocityControl(
+  leftMotorBus_.velocityControl(
       BoardPins::kLeftMotorAddress,
       static_cast<int16_t>(leftTarget * BoardPins::kLeftMotorSign),
       activeTuning_.motorAccel);
-  motorBus_.velocityControl(
+  rightMotorBus_.velocityControl(
       BoardPins::kRightMotorAddress,
       static_cast<int16_t>(rightTarget * BoardPins::kRightMotorSign),
       activeTuning_.motorAccel);
@@ -348,24 +452,24 @@ void App::motorPollTask() {
   int16_t rpm = 0;
   uint8_t flags = 0;
 
-  if (motorBus_.readRealTimeSpeed(BoardPins::kLeftMotorAddress, rpm)) {
+  if (leftMotorBus_.readRealTimeSpeed(BoardPins::kLeftMotorAddress, rpm)) {
     leftMotor_.online = true;
     leftMotor_.actualRpm = static_cast<int16_t>(rpm * BoardPins::kLeftMotorSign);
     leftMotor_.lastResponseMs = nowMs;
   }
-  if (motorBus_.readStateFlag(BoardPins::kLeftMotorAddress, flags)) {
+  if (leftMotorBus_.readStateFlag(BoardPins::kLeftMotorAddress, flags)) {
     leftMotor_.online = true;
     leftMotor_.stateFlags = flags;
     leftMotor_.lastResponseMs = nowMs;
     applyMotorFlags(flags, leftMotor_);
   }
 
-  if (motorBus_.readRealTimeSpeed(BoardPins::kRightMotorAddress, rpm)) {
+  if (rightMotorBus_.readRealTimeSpeed(BoardPins::kRightMotorAddress, rpm)) {
     rightMotor_.online = true;
     rightMotor_.actualRpm = static_cast<int16_t>(rpm * BoardPins::kRightMotorSign);
     rightMotor_.lastResponseMs = nowMs;
   }
-  if (motorBus_.readStateFlag(BoardPins::kRightMotorAddress, flags)) {
+  if (rightMotorBus_.readStateFlag(BoardPins::kRightMotorAddress, flags)) {
     rightMotor_.online = true;
     rightMotor_.stateFlags = flags;
     rightMotor_.lastResponseMs = nowMs;
@@ -398,15 +502,33 @@ void App::enterFault(const FaultCode code) {
     telemetry_.metrics.fallEventCount++;
     tuneMode_ = TuneMode::FaultLock;
   }
+  stopMotorTest();
+  motorFeedbackGraceUntilMs_ = 0;
   armed_ = false;
   stopMotors();
 }
 
+void App::stopMotorTest() {
+  motorTestActive_ = false;
+  leftMotorTestRpm_ = 0.0f;
+  rightMotorTestRpm_ = 0.0f;
+  telemetry_.leftRpmTarget = 0.0f;
+  telemetry_.rightRpmTarget = 0.0f;
+  telemetry_.balanceOutput = 0.0f;
+  telemetry_.speedOutput = 0.0f;
+  telemetry_.turnOutput = 0.0f;
+}
+
+void App::resetMotorFeedback() {
+  leftMotor_ = MotorFeedback{};
+  rightMotor_ = MotorFeedback{};
+}
+
 void App::stopMotors() {
-  motorBus_.stopNow(BoardPins::kLeftMotorAddress);
-  motorBus_.stopNow(BoardPins::kRightMotorAddress);
-  motorBus_.enableMotor(BoardPins::kLeftMotorAddress, false);
-  motorBus_.enableMotor(BoardPins::kRightMotorAddress, false);
+  leftMotorBus_.stopNow(BoardPins::kLeftMotorAddress);
+  rightMotorBus_.stopNow(BoardPins::kRightMotorAddress);
+  leftMotorBus_.enableMotor(BoardPins::kLeftMotorAddress, false);
+  rightMotorBus_.enableMotor(BoardPins::kRightMotorAddress, false);
 }
 
 void App::updateAssistSuggestion() {

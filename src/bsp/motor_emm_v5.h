@@ -17,7 +17,7 @@ class EmmV5Bus {
  private:
   bool writeCommand(const uint8_t* data, size_t length);
   bool waitForFrame(uint8_t expectedAddress, uint8_t expectedFunction, uint8_t* buffer,
-                    size_t& length, uint32_t timeoutMs = 4);
+                    size_t bufferCapacity, size_t& length, uint32_t timeoutMs = 8);
 
   HardwareSerial* serial_ = nullptr;
 };

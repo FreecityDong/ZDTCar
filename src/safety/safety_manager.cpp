@@ -6,16 +6,18 @@
 #include "common/math_utils.h"
 
 FaultCode SafetyManager::evaluate(const TelemetrySnapshot& snapshot, const MotorFeedback& leftMotor,
-                                  const MotorFeedback& rightMotor, const uint32_t imuLastUpdateMs) {
+                                  const MotorFeedback& rightMotor, const uint32_t imuLastUpdateMs,
+                                  const bool checkMotorOffline) {
   FaultCode nextFault = FaultCode::None;
 
   if (snapshot.tsMs - imuLastUpdateMs > BoardPins::kImuTimeoutMs) {
     nextFault = FaultCode::ImuDataTimeout;
   } else if (absValue(snapshot.pitchDeg) > BoardPins::kPitchFaultLimitDeg) {
     nextFault = FaultCode::PitchLimitExceeded;
-  } else if (snapshot.armed && (!leftMotor.online || snapshot.tsMs - leftMotor.lastResponseMs > BoardPins::kMotorTimeoutMs)) {
+  } else if (checkMotorOffline && snapshot.armed &&
+             (!leftMotor.online || snapshot.tsMs - leftMotor.lastResponseMs > BoardPins::kMotorTimeoutMs)) {
     nextFault = FaultCode::MotorLeftOffline;
-  } else if (snapshot.armed &&
+  } else if (checkMotorOffline && snapshot.armed &&
              (!rightMotor.online || snapshot.tsMs - rightMotor.lastResponseMs > BoardPins::kMotorTimeoutMs)) {
     nextFault = FaultCode::MotorRightOffline;
   } else if (leftMotor.blockedProtection || rightMotor.blockedProtection || leftMotor.blocked ||

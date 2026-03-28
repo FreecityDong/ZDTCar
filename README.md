@@ -42,6 +42,7 @@ src/
   tuning/       PID 存储与串口 JSON 协议
 tools/
   serial_tuner.py    串口在线调参工具
+  auto_tune.py       自动闭环 PID 调参脚本
 docs/
   平衡小车技术方案.md
 ```
@@ -99,6 +100,18 @@ python3 tools/serial_tuner.py --list-ports
 python3 tools/serial_tuner.py --port /dev/cu.usbmodemXXXX --baud 115200
 ```
 
+自动闭环调参（上位机脚本）：
+
+```bash
+python3 tools/auto_tune.py --port /dev/cu.usbmodemXXXX --baud 115200 --max-iterations 4
+```
+
+说明：
+
+- 脚本会自动执行动作序列（speed/turn）、读取 telemetry、计算评分并迭代 `angle/speed` PID。
+- 默认不会保存到 NVS，确认效果后再加 `--save-best`。
+- 调参阶段建议先让车轮悬空，再过渡到扶持落地。
+
 常用命令：
 
 ```text
@@ -108,6 +121,8 @@ arm on
 arm off
 speed 20
 turn 10
+motor_test left 150
+motor_test right -150
 set angle kp 40
 set angle kd 1.0
 set speed kp 0.45

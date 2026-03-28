@@ -5,7 +5,8 @@
 class SafetyManager {
  public:
   FaultCode evaluate(const TelemetrySnapshot& snapshot, const MotorFeedback& leftMotor,
-                     const MotorFeedback& rightMotor, uint32_t imuLastUpdateMs);
+                     const MotorFeedback& rightMotor, uint32_t imuLastUpdateMs,
+                     bool checkMotorOffline = true);
   void clear();
   FaultCode faultCode() const { return latchedFault_; }
   bool isFaulted() const { return latchedFault_ != FaultCode::None; }

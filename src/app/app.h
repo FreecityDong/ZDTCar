@@ -23,19 +23,26 @@ class App {
   void handleCommand(const ParsedCommand& command);
   void applyTuning(const ControlTuning& tuning, bool resetControllers);
   bool canApplyPendingConfig() const;
+  bool motorFeedbackGraceActive(uint32_t nowMs) const;
+  bool applyMotorTestCommand(const ParsedCommand& command);
   void pollImuTask();
   void controlTask();
   void motorPollTask();
   void telemetryTask();
   void ledTask();
   void enterFault(FaultCode code);
+  void stopMotorTest();
+  void resetMotorFeedback();
   void stopMotors();
   void updateAssistSuggestion();
   PIDGains* gainsForGroup(const char* group);
 
   TwoWire wire_ = TwoWire(0);
   ImuMpu6050 imu_;
-  EmmV5Bus motorBus_;
+  HardwareSerial leftMotorSerial_ = HardwareSerial(1);
+  HardwareSerial rightMotorSerial_ = HardwareSerial(2);
+  EmmV5Bus leftMotorBus_;
+  EmmV5Bus rightMotorBus_;
   ComplementaryFilter complementaryFilter_;
   BalanceController balanceController_;
   SpeedController speedController_;
@@ -54,9 +61,12 @@ class App {
 
   bool imuReady_ = false;
   bool armed_ = false;
+  bool motorTestActive_ = false;
   TuneMode tuneMode_ = TuneMode::Idle;
   float userSpeedTargetRpm_ = 0.0f;
   float userTurnTargetRpm_ = 0.0f;
+  float leftMotorTestRpm_ = 0.0f;
+  float rightMotorTestRpm_ = 0.0f;
   float filteredAverageRpm_ = 0.0f;
   uint32_t lastImuTaskUs_ = 0;
   uint32_t lastControlTaskUs_ = 0;
@@ -64,4 +74,5 @@ class App {
   uint32_t lastTelemetryMs_ = 0;
   uint32_t lastLedMs_ = 0;
   uint32_t lastAssistMs_ = 0;
+  uint32_t motorFeedbackGraceUntilMs_ = 0;
 };

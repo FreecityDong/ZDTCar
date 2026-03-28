@@ -70,7 +70,15 @@ class SerialTuner:
         self.baudrate = baudrate
         self.timeout = timeout
         self.state = RuntimeState()
-        self._serial = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
+        self._serial = serial.Serial(
+            port=port,
+            baudrate=baudrate,
+            timeout=timeout,
+            dsrdtr=False,
+            rtscts=False,
+        )
+        self._serial.dtr = False
+        self._serial.rts = False
         self._running = True
         self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._message_queue: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -217,6 +225,7 @@ Commands:
   arm <on|off>
   speed <rpm>
   turn <rpm>
+  motor_test <left|right|both> <rpm>
   stop                            Shortcut for arm off + speed 0 + turn 0
   set <angle|speed|turn> <kp|ki|kd|integral_limit|output_limit> <value>
   gains <angle|speed|turn> <kp> <ki> [kd] [integral_limit] [output_limit]
@@ -303,6 +312,14 @@ def handle_command(tuner: SerialTuner, line: str) -> bool:
 
     if cmd == "stop":
         tuner.send({"cmd": "set_drive", "arm": False, "speed_rpm": 0.0, "turn_rpm": 0.0})
+        return True
+
+    if cmd == "motor_test" and len(args) == 3:
+        target = args[1].lower()
+        if target not in {"left", "right", "both"}:
+            print("[cli] motor_test target must be left/right/both")
+            return True
+        tuner.send({"cmd": "motor_test", "target": target, "rpm": float(args[2])})
         return True
 
     if cmd == "set" and len(args) == 4:

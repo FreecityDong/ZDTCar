@@ -13,6 +13,7 @@ struct ParsedCommand {
     RollbackPid,
     SetMode,
     SetDrive,
+    MotorTest,
     GetStatus,
     SetLimit,
     ClearFault,
@@ -34,6 +35,7 @@ struct ParsedCommand {
   bool hasArm = false;
   bool hasSpeedRpm = false;
   bool hasTurnRpm = false;
+  bool hasMotorTestRpm = false;
   float kp = 0.0f;
   float ki = 0.0f;
   float kd = 0.0f;
@@ -47,6 +49,8 @@ struct ParsedCommand {
   bool arm = false;
   float speedRpm = 0.0f;
   float turnRpm = 0.0f;
+  char motorTarget[8] = {};
+  float motorTestRpm = 0.0f;
 };
 
 class TuneProtocol {
